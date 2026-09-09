@@ -1,0 +1,644 @@
+// ============================================================
+//  SOLAR SYSTEM 3D — Upgraded Interactive Edition
+//  Compiler: MinGW-64 | GLUT | OpenGL
+//  Build:  g++ solar_system.cpp -o solar_system.exe
+//          -lopengl32 -lglu32 -lfreeglut -lwinmm
+// ============================================================
+
+#include <GL/glut.h>
+#include <cmath>
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <windows.h>   // PlaySound, MessageBox
+#include <mmsystem.h>  // PlaySound flags  (link: -lwinmm)
+
+#pragma comment(lib, "winmm.lib")
+
+// ── Constants ────────────────────────────────────────────────
+static const float PI  = 3.14159265f;
+static const int   WIN = 1000;        // window size
+
+// ── Sound file path – point this to your local audio file ───
+// Supports WAV. Change path as needed.
+static const char* SOUND_FILE = "space_ambient.wav";
+
+// ── Planet data ──────────────────────────────────────────────
+struct Planet {
+    const char* name;
+    float       orbitRadius;   // scene units
+    float       size;          // sphere radius
+    float       speed;         // degrees / frame
+    float       angle;         // current angle
+    float       tilt;          // axial tilt (degrees)
+    float       selfRotation;  // self-spin angle
+    float       selfSpeed;     // self-spin speed
+    float       r, g, b;       // base color
+    const char* info[6];       // info panel lines
+};
+
+static Planet planets[] = {
+    // Mercury
+    { "Mercury",  3.5f, 0.15f, 1.60f, 0,  0.0f,  0, 0.10f, 0.70f,0.70f,0.70f,
+      {"Type:   Terrestrial","Radius: 2,439 km","Day:    58.6 Earth days",
+       "Year:   88 Earth days","Moons:  0","Temp:   -180 to 430 C"} },
+    // Venus
+    { "Venus",    5.0f, 0.30f, 1.17f, 0,177.3f,  0, 0.04f, 0.95f,0.80f,0.30f,
+      {"Type:   Terrestrial","Radius: 6,051 km","Day:    243 Earth days",
+       "Year:   225 Earth days","Moons:  0","Temp:   465 C (avg)"} },
+    // Earth
+    { "Earth",    6.8f, 0.32f, 1.00f, 0, 23.5f,  0, 0.40f, 0.25f,0.55f,1.00f,
+      {"Type:   Terrestrial","Radius: 6,371 km","Day:    24 hours",
+       "Year:   365.25 days","Moons:  1","Temp:   -88 to 58 C"} },
+    // Mars
+    { "Mars",     8.8f, 0.22f, 0.80f, 0, 25.2f,  0, 0.38f, 0.90f,0.30f,0.15f,
+      {"Type:   Terrestrial","Radius: 3,390 km","Day:    24.6 hours",
+       "Year:   687 Earth days","Moons:  2","Temp:   -125 to 20 C"} },
+    // Jupiter
+    { "Jupiter", 12.5f, 0.80f, 0.43f, 0,  3.1f,  0, 1.00f, 0.95f,0.76f,0.55f,
+      {"Type:   Gas Giant","Radius: 71,492 km","Day:    9.9 hours",
+       "Year:   11.9 Earth years","Moons:  95","Temp:   -145 C (cloud top)"} },
+    // Saturn
+    { "Saturn",  17.0f, 0.68f, 0.32f, 0, 26.7f,  0, 0.90f, 0.95f,0.85f,0.55f,
+      {"Type:   Gas Giant","Radius: 60,268 km","Day:    10.7 hours",
+       "Year:   29.4 Earth years","Moons:  146","Temp:   -178 C (avg)"} },
+    // Uranus
+    { "Uranus",  21.5f, 0.50f, 0.22f, 0, 97.8f,  0, 0.60f, 0.53f,0.82f,0.92f,
+      {"Type:   Ice Giant","Radius: 25,559 km","Day:    17.2 hours",
+       "Year:   84 Earth years","Moons:  27","Temp:   -224 C (avg)"} },
+    // Neptune
+    { "Neptune", 25.5f, 0.48f, 0.18f, 0, 28.3f,  0, 0.55f, 0.20f,0.35f,0.90f,
+      {"Type:   Ice Giant","Radius: 24,622 km","Day:    16.1 hours",
+       "Year:   165 Earth years","Moons:  16","Temp:   -214 C (avg)"} },
+};
+static const int NUM_PLANETS = 8;
+
+// ── State ─────────────────────────────────────────────────────
+static float  camRotX     =  25.0f;
+static float  camRotY     =   0.0f;
+static float  camZoom     =  30.0f;
+static float  sunRotation =   0.0f;
+static bool   paused      = false;
+static bool   darkMode    = true;
+static bool   showOrbits  = true;
+static bool   showLabels  = true;
+static bool   showHelp    = true;
+static int    selectedPlanet = -1;  // -1 = none
+static float  infoAlpha   = 0.0f;
+
+// Mouse drag
+static int    lastMX = 0, lastMY = 0;
+static bool   dragging = false;
+
+// Stars
+static float stars[500][3];
+static bool  starsInit = false;
+
+// Info panel fade
+static float  infoPanelTimer = 0.0f;
+
+// ── Utility ───────────────────────────────────────────────────
+static float randf(float lo, float hi) {
+    return lo + (hi - lo) * (rand() / (float)RAND_MAX);
+}
+
+// Draw text at 3D raster position
+static void drawText3D(float x, float y, float z, const char* s, float r, float g, float b) {
+    glColor3f(r,g,b);
+    glRasterPos3f(x,y,z);
+    while (*s) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *s++);
+}
+
+// Draw screen-space text (2D overlay)
+static void drawText2D(float x, float y, const char* s, float r, float g, float b, float a=1.0f) {
+    glColor4f(r,g,b,a);
+    glRasterPos2f(x, y);
+    while (*s) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, *s++);
+}
+static void drawText2DSmall(float x, float y, const char* s, float r, float g, float b, float a=1.0f) {
+    glColor4f(r,g,b,a);
+    glRasterPos2f(x, y);
+    while (*s) glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, *s++);
+}
+
+// ── Stars ─────────────────────────────────────────────────────
+static void initStars() {
+    if (starsInit) return;
+    srand(42);
+    for (int i = 0; i < 500; i++) {
+        float theta = randf(0, 2*PI);
+        float phi   = randf(0, PI);
+        float r     = randf(60, 80);
+        stars[i][0] = r * sinf(phi) * cosf(theta);
+        stars[i][1] = r * cosf(phi);
+        stars[i][2] = r * sinf(phi) * sinf(theta);
+    }
+    starsInit = true;
+}
+
+static void drawStars() {
+    glDisable(GL_LIGHTING);
+    glPointSize(1.8f);
+    glBegin(GL_POINTS);
+    for (int i = 0; i < 500; i++) {
+        float br = randf(0.6f, 1.0f);
+        glColor3f(br,br,br);
+        glVertex3fv(stars[i]);
+    }
+    glEnd();
+    glPointSize(1.0f);
+}
+
+// ── Orbit ring ───────────────────────────────────────────────
+static void drawOrbit(float r, float a = 0.3f) {
+    glDisable(GL_LIGHTING);
+    if (darkMode)
+        glColor4f(1,1,1, a);
+    else
+        glColor4f(0.4f,0.4f,0.6f, a);
+    glBegin(GL_LINE_LOOP);
+    for (int i = 0; i < 120; i++) {
+        float ang = 2*PI*i/120;
+        glVertex3f(cosf(ang)*r, 0, sinf(ang)*r);
+    }
+    glEnd();
+}
+
+// ── Saturn rings ─────────────────────────────────────────────
+static void drawSaturnRings(float innerR, float outerR) {
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    int steps = 80;
+    for (int i = 0; i <= steps; i++) {
+        float t  = (float)i / steps;
+        float r  = innerR + t*(outerR-innerR);
+        float a  = 0.45f - 0.2f*t;
+        glColor4f(0.85f, 0.78f, 0.60f, a);
+        glBegin(GL_LINE_LOOP);
+        for (int j = 0; j < 80; j++) {
+            float ang = 2*PI*j/80;
+            glVertex3f(cosf(ang)*r, 0, sinf(ang)*r);
+        }
+        glEnd();
+    }
+    glDisable(GL_BLEND);
+}
+
+// ── Lighting setup ────────────────────────────────────────────
+static void setupLighting() {
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
+    glEnable(GL_COLOR_MATERIAL);
+    glColorMaterial(GL_FRONT, GL_AMBIENT_AND_DIFFUSE);
+    glShadeModel(GL_SMOOTH);
+
+    // Sun = point light at origin
+    GLfloat pos[]  = {0,0,0,1};
+    GLfloat amb[]  = {0.05f,0.05f,0.05f,1};
+    GLfloat diff[] = {1,0.95f,0.85f,1};
+    GLfloat spec[] = {1,1,0.9f,1};
+    glLightfv(GL_LIGHT0, GL_POSITION, pos);
+    glLightfv(GL_LIGHT0, GL_AMBIENT,  amb);
+    glLightfv(GL_LIGHT0, GL_DIFFUSE,  diff);
+    glLightfv(GL_LIGHT0, GL_SPECULAR, spec);
+
+    // Slight global ambient so dark side isn't pitch black
+    GLfloat globalAmb[] = {0.04f,0.04f,0.06f,1};
+    glLightModelfv(GL_LIGHT_MODEL_AMBIENT, globalAmb);
+}
+
+// ── Sun glow (additive blended halos) ────────────────────────
+static void drawSunGlow() {
+    glDisable(GL_LIGHTING);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+    int halos = 5;
+    for (int h = 1; h <= halos; h++) {
+        float s = 1.0f + h*0.28f;
+        float a = 0.06f / h;
+        glColor4f(1.0f, 0.6f, 0.1f, a);
+        glutSolidSphere(s, 20, 20);
+    }
+    glDisable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+// ── Draw the Sun ─────────────────────────────────────────────
+static void drawSun() {
+    glDisable(GL_LIGHTING);
+    // Core
+    glColor3f(1.0f, 0.85f, 0.2f);
+    glPushMatrix();
+        glRotatef(sunRotation, 0,1,0);
+        glutSolidSphere(1.0f, 60, 60);
+    glPopMatrix();
+    drawSunGlow();
+    glEnable(GL_LIGHTING);
+}
+
+// ── Draw a planet ─────────────────────────────────────────────
+static void drawPlanet(int idx) {
+    Planet& p = planets[idx];
+
+    glPushMatrix();
+        // Orbit revolution
+        glRotatef(p.angle, 0, 1, 0);
+        glTranslatef(p.orbitRadius, 0, 0);
+        // Axial tilt
+        glRotatef(p.tilt, 0, 0, 1);
+        // Self rotation
+        glRotatef(p.selfRotation, 0, 1, 0);
+
+        // Highlight selected planet
+        if (idx == selectedPlanet) {
+            glDisable(GL_LIGHTING);
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+            glColor4f(1,1,0.3f, 0.18f);
+            glutSolidSphere(p.size * 1.6f, 30, 30);
+            glDisable(GL_BLEND);
+            glEnable(GL_LIGHTING);
+        }
+
+        // Planet body
+        glEnable(GL_LIGHTING);
+        glColor3f(p.r, p.g, p.b);
+        glutSolidSphere(p.size, 60, 60);
+
+        // Saturn's rings
+        if (idx == 5) {
+            glPushMatrix();
+                glRotatef(26.7f, 1,0,0);
+                drawSaturnRings(p.size*1.35f, p.size*2.3f);
+            glPopMatrix();
+        }
+
+        // Label above planet
+        if (showLabels) {
+            float lc = darkMode ? 1.0f : 0.1f;
+            drawText3D(0, p.size*1.5f+0.2f, 0, p.name, lc,lc,lc);
+        }
+    glPopMatrix();
+}
+
+// ── 2D overlay helpers ────────────────────────────────────────
+static void begin2D() {
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    gluOrtho2D(0, WIN, 0, WIN);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_LIGHTING);
+}
+static void end2D() {
+    glEnable(GL_DEPTH_TEST);
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
+}
+
+// ── Draw rounded rect (2D) ────────────────────────────────────
+static void drawPanel(float x, float y, float w, float h, float a) {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (darkMode)
+        glColor4f(0.05f, 0.07f, 0.15f, a*0.88f);
+    else
+        glColor4f(0.92f, 0.94f, 1.00f, a*0.90f);
+    glBegin(GL_QUADS);
+        glVertex2f(x,   y);
+        glVertex2f(x+w, y);
+        glVertex2f(x+w, y+h);
+        glVertex2f(x,   y+h);
+    glEnd();
+    // border
+    if (darkMode)
+        glColor4f(0.4f,0.6f,1.0f, a*0.7f);
+    else
+        glColor4f(0.3f,0.3f,0.7f, a*0.7f);
+    glLineWidth(1.5f);
+    glBegin(GL_LINE_LOOP);
+        glVertex2f(x,   y);
+        glVertex2f(x+w, y);
+        glVertex2f(x+w, y+h);
+        glVertex2f(x,   y+h);
+    glEnd();
+    glLineWidth(1.0f);
+    glDisable(GL_BLEND);
+}
+
+// ── Info panel ────────────────────────────────────────────────
+static void drawInfoPanel() {
+    if (selectedPlanet < 0 || infoAlpha <= 0.01f) return;
+    Planet& p = planets[selectedPlanet];
+    float a   = infoAlpha;
+
+    float pw = 280, ph = 190;
+    float px = WIN - pw - 18, py = 18;
+
+    begin2D();
+    drawPanel(px, py, pw, ph, a);
+
+    float tx = px + 14;
+    float ty = py + ph - 28;
+    float tc = darkMode ? 1.0f : 0.05f;
+    float sc = darkMode ? 0.65f : 0.30f;
+
+    // Title
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    drawText2D(tx, ty, p.name, p.r, p.g, p.b, a);
+    ty -= 22;
+
+    for (int i = 0; i < 6; i++) {
+        drawText2DSmall(tx, ty, p.info[i], tc,tc,tc, a);
+        ty -= 18;
+    }
+    glDisable(GL_BLEND);
+    end2D();
+}
+
+// ── HUD / Help ───────────────────────────────────────────────
+static void drawHUD() {
+    begin2D();
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    float tc = darkMode ? 1.0f : 0.05f;
+    float sc = darkMode ? 0.65f : 0.35f;
+
+    // Top-left: mode badges
+    char buf[64];
+    sprintf(buf, "[%s] [Orbits:%s] [Labels:%s]",
+        paused ? "PAUSED" : "PLAYING",
+        showOrbits ? "ON" : "OFF",
+        showLabels ? "ON" : "OFF");
+    drawText2DSmall(14, WIN-20, buf, sc,sc,tc*0.9f, 0.9f);
+
+    // Bottom-left: theme badge
+    const char* theme = darkMode ? "DARK MODE" : "LIGHT MODE";
+    drawText2DSmall(14, 14, theme, sc,sc,tc, 0.85f);
+
+    if (showHelp) {
+        float pw = 260, ph = 200;
+        float px = 14, py = 30;
+        drawPanel(px, py, pw, ph, 0.80f);
+
+        float tx = px+12, ty = py+ph-20;
+        const char* keys[] = {
+            "CONTROLS",
+            "Click planet  — show info",
+            "Drag          — rotate view",
+            "Scroll        — zoom in/out",
+            "D             — dark/light mode",
+            "P / Space     — pause / play",
+            "O             — toggle orbits",
+            "L             — toggle labels",
+            "H             — hide/show help",
+            "S             — play sound",
+            "+/-           — speed up/down",
+        };
+        for (int i = 0; i < 11; i++) {
+            float br = (i==0) ? 0.5f : sc;
+            float bg = (i==0) ? 0.7f : sc;
+            float bb = (i==0) ? 1.0f : tc;
+            drawText2DSmall(tx, ty, keys[i], br,bg,bb, 0.95f);
+            ty -= 17;
+        }
+    } else {
+        drawText2DSmall(14, 32, "H — show help", sc,sc,tc*0.8f, 0.7f);
+    }
+
+    glDisable(GL_BLEND);
+    end2D();
+}
+
+// ── Planet picking (ray–sphere in screen coords) ──────────────
+// Simple approach: project each planet center to screen and check 2D distance
+static void pickPlanet(int mx, int my) {
+    // We read the modelview & projection to project planet positions
+    GLdouble mv[16], proj[16];
+    GLint    vp[4];
+    glGetDoublev(GL_MODELVIEW_MATRIX, mv);
+    glGetDoublev(GL_PROJECTION_MATRIX, proj);
+    glGetIntegerv(GL_VIEWPORT, vp);
+
+    int closest = -1;
+    float bestDist = 999999;
+
+    for (int i = 0; i < NUM_PLANETS; i++) {
+        Planet& p = planets[i];
+        float ang = p.angle * PI / 180.0f;
+        float wx = cosf(ang) * p.orbitRadius;
+        float wz = sinf(ang) * p.orbitRadius;
+        float wy = 0;
+
+        GLdouble sx, sy, sz;
+        gluProject(wx, wy, wz, mv, proj, vp, &sx, &sy, &sz);
+
+        float dx = sx - mx;
+        float dy = sy - my;
+        float dist = sqrtf(dx*dx + dy*dy);
+        // threshold scales roughly with perspective size
+        float thresh = 20.0f + p.size * 15.0f;
+        if (dist < thresh && dist < bestDist) {
+            bestDist = dist;
+            closest  = i;
+        }
+    }
+
+    if (closest >= 0) {
+        selectedPlanet = closest;
+        infoAlpha      = 1.0f;
+        infoPanelTimer = 8.0f;      // seconds before fade
+    } else {
+        selectedPlanet = -1;
+        infoAlpha      = 0.0f;
+    }
+}
+
+// ── Display ───────────────────────────────────────────────────
+static void display() {
+    // Background colour
+    if (darkMode)
+        glClearColor(0.01f, 0.01f, 0.04f, 1);
+    else
+        glClearColor(0.72f, 0.78f, 0.92f, 1);
+
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // ── 3D scene ──────────────────────────────────────────────
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+    gluLookAt(0, camZoom*0.4f, camZoom,
+              0, 0, 0,
+              0, 1, 0);
+    glRotatef(camRotX, 1, 0, 0);
+    glRotatef(camRotY, 0, 1, 0);
+
+    setupLighting();
+
+    if (darkMode) drawStars();
+
+    drawSun();
+
+    // Orbits
+    if (showOrbits) {
+        glDisable(GL_LIGHTING);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        for (int i = 0; i < NUM_PLANETS; i++)
+            drawOrbit(planets[i].orbitRadius);
+        glDisable(GL_BLEND);
+    }
+
+    // Planets
+    for (int i = 0; i < NUM_PLANETS; i++)
+        drawPlanet(i);
+
+    // ── 2D overlays ───────────────────────────────────────────
+    drawInfoPanel();
+    drawHUD();
+
+    glutSwapBuffers();
+}
+
+// ── Update / Animation ────────────────────────────────────────
+static float speedMul = 1.0f;
+
+static void update(int) {
+    if (!paused) {
+        sunRotation += 0.15f * speedMul;
+        for (int i = 0; i < NUM_PLANETS; i++) {
+            planets[i].angle        += planets[i].speed    * speedMul;
+            planets[i].selfRotation += planets[i].selfSpeed * speedMul * 10.0f;
+            if (planets[i].angle        > 360) planets[i].angle        -= 360;
+            if (planets[i].selfRotation > 360) planets[i].selfRotation -= 360;
+        }
+    }
+
+    // Info panel fade
+    if (infoPanelTimer > 0) {
+        infoPanelTimer -= 0.016f;
+        if (infoPanelTimer < 1.5f)
+            infoAlpha = infoPanelTimer / 1.5f;
+    }
+
+    glutPostRedisplay();
+    glutTimerFunc(16, update, 0);
+}
+
+// ── Reshape ───────────────────────────────────────────────────
+static void reshape(int w, int h) {
+    if (h == 0) h = 1;
+    glViewport(0, 0, w, h);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluPerspective(50.0, (double)w/h, 0.5, 300.0);
+    glMatrixMode(GL_MODELVIEW);
+}
+
+// ── Keyboard ──────────────────────────────────────────────────
+static void keyboard(unsigned char k, int /*x*/, int /*y*/) {
+    switch (k) {
+        case 'd': case 'D': darkMode   = !darkMode;   break;
+        case 'p': case 'P':
+        case ' ':            paused    = !paused;      break;
+        case 'o': case 'O': showOrbits = !showOrbits;  break;
+        case 'l': case 'L': showLabels = !showLabels;  break;
+        case 'h': case 'H': showHelp   = !showHelp;    break;
+        case '+': case '=': speedMul = (speedMul < 5.0f) ? speedMul+0.25f : 5.0f; break;
+        case '-': case '_': speedMul = (speedMul > 0.0f) ? speedMul-0.25f : 0.0f; break;
+        case 's': case 'S':
+            // Play local WAV asynchronously
+            PlaySoundA(SOUND_FILE, NULL, SND_FILENAME | SND_ASYNC | SND_LOOP);
+            break;
+        case 'm': case 'M':
+            PlaySoundA(NULL, NULL, 0);   // stop sound
+            break;
+        case 27:  // ESC — stop sound & exit
+            PlaySoundA(NULL, NULL, 0);
+            exit(0);
+    }
+    glutPostRedisplay();
+}
+
+// ── Mouse ─────────────────────────────────────────────────────
+static void mouse(int button, int state, int x, int y) {
+    if (button == GLUT_LEFT_BUTTON) {
+        if (state == GLUT_DOWN) {
+            dragging = true;
+            lastMX   = x;
+            lastMY   = y;
+        } else if (state == GLUT_UP) {
+            if (abs(x-lastMX) < 4 && abs(y-lastMY) < 4) {
+                // It's a click — pick planet
+                pickPlanet(x, glutGet(GLUT_WINDOW_HEIGHT) - y);
+            }
+            dragging = false;
+        }
+    }
+    // Scroll wheel
+    if (button == 3) { camZoom -= 1.5f; if (camZoom < 5)  camZoom = 5;   glutPostRedisplay(); }
+    if (button == 4) { camZoom += 1.5f; if (camZoom > 90) camZoom = 90;  glutPostRedisplay(); }
+}
+
+static void motion(int x, int y) {
+    if (dragging) {
+        camRotY += (x - lastMX) * 0.5f;
+        camRotX += (y - lastMY) * 0.5f;
+        if (camRotX >  89) camRotX =  89;
+        if (camRotX < -89) camRotX = -89;
+        lastMX = x;
+        lastMY = y;
+    }
+    glutPostRedisplay();
+}
+
+// ── Init ──────────────────────────────────────────────────────
+static void init() {
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST);
+    glHint(GL_LINE_SMOOTH_HINT,            GL_NICEST);
+    glEnable(GL_LINE_SMOOTH);
+    glEnable(GL_POINT_SMOOTH);
+    glEnable(GL_NORMALIZE);
+
+    // Start planets at different positions
+    float offsets[] = {47,120,200,287,45,170,300,350};
+    for (int i = 0; i < NUM_PLANETS; i++)
+        planets[i].angle = offsets[i];
+
+    initStars();
+
+    // Auto-play ambient sound if file exists
+    PlaySoundA(SOUND_FILE, NULL, SND_FILENAME | SND_ASYNC | SND_LOOP | SND_NODEFAULT);
+}
+
+// ── Main ──────────────────────────────────────────────────────
+int main(int argc, char** argv) {
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGBA | GLUT_DEPTH);
+    glutInitWindowSize(WIN, WIN);
+    glutInitWindowPosition(100, 50);
+    glutCreateWindow("Solar System 3D — Interactive Edition");
+
+    init();
+
+    glutDisplayFunc(display);
+    glutReshapeFunc(reshape);
+    glutKeyboardFunc(keyboard);
+    glutMouseFunc(mouse);
+    glutMotionFunc(motion);
+    glutTimerFunc(0, update, 0);
+
+    glutMainLoop();
+    return 0;
+}
